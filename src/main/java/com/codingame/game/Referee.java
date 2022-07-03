@@ -1,116 +1,182 @@
 package com.codingame.game;
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.stream.Collectors;
+import java.util.ArrayList;
+import java.util.Random;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import com.codingame.gameengine.core.AbstractMultiplayerPlayer;
 import com.codingame.gameengine.core.AbstractPlayer.TimeoutException;
 import com.codingame.gameengine.core.AbstractReferee;
-import com.codingame.gameengine.core.SoloGameManager;
-import com.codingame.gameengine.module.entities.Curve;
+import com.codingame.gameengine.core.GameManager;
+import com.codingame.gameengine.core.MultiplayerGameManager;
 import com.codingame.gameengine.module.entities.GraphicEntityModule;
-import com.codingame.gameengine.module.entities.Sprite;
 import com.google.inject.Inject;
 
+import static com.codingame.game.Constants.CANNONBALL_RANGE_TURN;
+import static java.lang.Math.floor;
+
 public class Referee extends AbstractReferee {
-    @Inject private SoloGameManager<Player> gameManager;
+    @Inject private MultiplayerGameManager<AbstractMultiplayerPlayer> gameManager;
     @Inject private GraphicEntityModule graphicEntityModule;
+    private Random random;
 
-    private Coord fishPosition;
-    private Coord eggPosition;
+    Integer windAngle = 0, windForce = 0;
 
-    private Sprite fishSprite;
-    private Sprite eggSprite;
+    ArrayList<CannonBall> cannonBalls = new ArrayList<>();
 
     @Override
     public void init() {
+//        System.setProperty("league.level", "2"); // todo: remove
+
+        random = new Random(gameManager.getSeed());
         gameManager.setFrameDuration(500);
-        
-        // Draw background
+
+        if (gameManager.getLeagueLevel() == 1) {
+            gameManager.setMaxTurns(9);
+        } else {
+            windAngle = random.nextInt(360);
+            windForce = 2 + random.nextInt(5);
+            gameManager.setMaxTurns(9);
+        }
+
+        initWindow();
+
+        initPlayers(gameManager.getLeagueLevel());
+    }
+
+    private void initWindow() {
         graphicEntityModule.createSprite().setImage(Constants.BACKGROUND_SPRITE);
+        graphicEntityModule.createSprite().setImage(Constants.WINDSOCK_SPRITE)
+                .setZIndex(100)
+                .setScale(.25)
+                .setAnchor(.5)
+                .setRotation(windAngle)
+                .setX(100)
+                .setY(100);
+        graphicEntityModule.createText(String.format("%d km/h", windForce*5))
+                .setZIndex(101)
+                .setScale(2)
+                .setX(100)
+                .setY(10);
+    }
 
-        Integer[] positions = Arrays.stream(gameManager.getTestCaseInput().get(0).split(" "))
-            .map(s -> Integer.valueOf(s))
-            .toArray(size -> new Integer[size]);
-        fishPosition = new Coord(positions[0], positions[1]);
-        eggPosition = new Coord(positions[2], positions[3]);
+    private void initPlayers(Integer leagueLevel) {
+        for (int i = 0; i < gameManager.getPlayerCount(); ++i) {
+            Player player = (Player) gameManager.getPlayer(i);
+            player.ship = new Ship(i);
 
-        eggSprite = graphicEntityModule.createSprite().setImage(Constants.EGGS_SPRITE)
-            .setX(eggPosition.x * Constants.CELL_SIZE + Constants.CELL_OFFSET)
-            .setY(eggPosition.y * Constants.CELL_SIZE + Constants.CELL_OFFSET)
-            .setAnchor(.5)
-            .setZIndex(1);
+            int x = 200 + 500 * (i % 4);
+            int y = 200 + (int)floor((i)/4.)*500;
 
-        fishSprite = graphicEntityModule.createSprite().setImage(Constants.FISH_SPRITE)
-            .setX(fishPosition.x * Constants.CELL_SIZE + Constants.CELL_OFFSET)
-            .setY(fishPosition.y * Constants.CELL_SIZE + Constants.CELL_OFFSET)
-            .setAnchor(.5)
-            .setZIndex(2);
+            player.ship.setPosition(new Vector(x, y));
+            player.ship.setRotation(i*10);
 
-        gameManager.getPlayer().sendInputLine(eggPosition.toString());
+            cannonBalls.add(new CannonBall(player.ship, Side.LEFT, graphicEntityModule));
+
+            player.shipEntity = new ShipEntity(player.ship, graphicEntityModule);
+        }
+        sendGlobalInfo();
+    }
+
+    private void sendGlobalInfo() {
+        for (int i = 0; i < gameManager.getPlayerCount(); ++i) {
+            Player receiver = (Player) gameManager.getPlayer(i);
+            sendInfoToPlayer(receiver);
+        }
+    }
+
+    private void sendInfoToPlayer(Player receiver) {
+        receiver.sendInputLine(String.valueOf(gameManager.getPlayerCount()));
+        receiver.sendInputLine(String.valueOf(receiver.getIndex()));
+        for (int i = 0; i < gameManager.getPlayerCount(); ++i) {
+            Player player = (Player) gameManager.getPlayer(i);
+            String[] playerInfo = playerInfo(player);
+            for (String s : playerInfo) {
+                receiver.sendInputLine(s);
+            }
+        }
+    }
+
+    private String[] playerInfo(Player player) {
+        String[] info = new String[2];
+        // <playerId>
+        info[0] = String.valueOf(player.getIndex());
+        // <ship.X> <ship.Y> <ship.rotation> <ship.sailRotation>
+        info[1] = String.valueOf(player.ship.Info());
+        return info;
     }
 
     @Override
     public void gameTurn(int turn) {
-        gameManager.getPlayer().sendInputLine(fishPosition.toString());
+//        resetGameTurnData();
 
-        gameManager.getPlayer().execute();
-
-        try {
-            List<String> outputs = gameManager.getPlayer().getOutputs();
-
-            String output = checkOutput(outputs);
-
-            if (output != null) {
-                Action action = Action.valueOf(output.toUpperCase());
-                checkInvalidAction(action);
-                fishPosition = fishPosition.add(Constants.ACTION_MAP.get(action)).add(Coord.RIGHT);
-            }
-
-        } catch (TimeoutException e) {
-            gameManager.loseGame("Timeout!");
+        for (int i = 0; i < gameManager.getPlayerCount(); ++i) {
+            Player player = (Player) gameManager.getPlayer(i);
+            player.ship.angleSail(10);
+            sendInfoToPlayer(player);
+            player.execute();
         }
+        // Get output from players
+        handlePlayerCommands();
 
-        // Check win condition
-        if (fishPosition.equals(eggPosition)) {
-            gameManager.winGame("Congrats!");
-            eggSprite.setScale(0);
-        }
-
+        moveObjects();
         updateView();
+
+        if (gameManager.getActivePlayers().size() < 2) {
+            abort();
+        }
+    }
+
+    private void handlePlayerCommands() {
+        for (int i = 0; i < gameManager.getPlayerCount(); ++i) {
+            Player player = (Player) gameManager.getPlayer(i);
+            try {
+                System.out.println(player.getOutputs());
+//                handleCommands(player, player.getOutputs());
+            } catch (TimeoutException e) {
+                player.deactivate("Timeout!");
+                gameManager.addToGameSummary(player.getNicknameToken() + " has not provided " + player.getExpectedOutputLines() + " lines in time");
+            }
+        }
+
+    }
+
+    private void moveObjects() {
+        cannonBalls.removeIf(CannonBall::shouldBeRemoved);
+        for (CannonBall cannonBall : cannonBalls) {
+            cannonBall.move();
+        }
     }
 
     private void updateView() {
-        fishSprite.setX(fishPosition.x * Constants.CELL_SIZE + Constants.CELL_OFFSET, Curve.LINEAR)
-            .setY(fishPosition.y * Constants.CELL_SIZE + Constants.CELL_OFFSET, Curve.LINEAR);
+        for (AtomicInteger i = new AtomicInteger(); i.get() < gameManager.getPlayerCount(); i.incrementAndGet()) {
+            Player player = (Player) gameManager.getPlayer(i.get());
+            player.shipEntity.update();
+        }
+        for (CannonBall cannonBall : cannonBalls) {
+            cannonBall.update();
+        }
     }
 
-    private String checkOutput(List<String> outputs) {
-        if (outputs.size() != 1) {
-            gameManager.loseGame("You did not send 1 output in your turn.");
-        } else {
-            String output = outputs.get(0);
-            if (!Arrays.asList(Constants.ACTIONS).contains(output)) {
-                gameManager
-                    .loseGame(
-                        String.format(
-                            "Expected output: %s but received %s",
-                            Arrays.asList(Constants.ACTIONS).stream().collect(Collectors.joining(" | ")),
-                            output
-                        )
-                    );
-            } else {
-                return output;
-            }
-        }
-        return null;
+    private void abort() {
+        gameManager.endGame();
+    }
+    private void endGame() {
+        gameManager.endGame();
+
+        Player p0 = (Player) gameManager.getPlayers().get(0);
+        Player p1 = (Player) gameManager.getPlayers().get(1);
+//        if (p0.getScore() > p1.getScore()) {
+//            p1.hud.setAlpha(0.3);
+//        }
+//        if (p0.getScore() < p1.getScore()) {
+//            p0.hud.setAlpha(0.3);
+//        }
     }
 
-    private void checkInvalidAction(Action action) {
-        if ((fishPosition.y == 0 && action == Action.UP)
-            || (fishPosition.y == Constants.ROWS - 1 && action == Action.DOWN)
-            || fishPosition.add(Coord.RIGHT).x > Constants.COLUMNS - 1) {
-            gameManager.loseGame("Your fish swum out of the game zone.");
-        }
+    private void setWinner(Player player) {
+        gameManager.addToGameSummary(GameManager.formatSuccessMessage(player.getNicknameToken() + " won!"));
+        player.setScore(10);
+        endGame();
     }
 }
